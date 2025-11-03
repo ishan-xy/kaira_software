@@ -1,0 +1,8 @@
+KAIRA---Testing-Module/
+.env
+.venv
+__pycache__/
+*.pyc
+*.wav
+images/
+*.log

@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AI Voice Assistant</title>
+    <meta charset="UTF-8">
+    <style>
+        html, body {
+            height: 100%;
+            margin: 0;
+        }
+        body {
+            background-color: black;
+            color: white;
+            font-family: Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            text-align: left; /* Left-align text for readability */
+        }
+        
+        /* A container to hold both displays */
+        .container {
+            width: 90%;
+            max-width: 800px;
+            margin: auto;
+        }
+
+        #textDisplay {
+            white-space: pre-wrap; /* Preserves spaces and line breaks */
+            font-size: 16px;
+            border: 1px solid #444;
+            padding: 10px;
+            min-height: 150px;
+            background-color: #111;
+        }
+        .yellow {
+            color: yellow;
+        }
+        .cyan {
+            color: cyan;
+        }
+
+        /* */
+        #aiResponseDisplay {
+            border-top: 2px solid #555;
+            margin-top: 20px;
+            padding-top: 10px;
+            font-size: 1.1em;
+        }
+        #aiResponseDisplay p {
+            margin: 8px 0;
+            line-height: 1.4;
+        }
+    </style>
+</head>
+<body>
+    
+    <div class="container">
+        <div id="textDisplay"></div>
+
+        -->
+        <div id="aiResponseDisplay"></div>
+    </div>
+
+    <script src="audioclient.js"></script>
+    <script src="webrtc_client.js"></script>
+</body>
+</html>

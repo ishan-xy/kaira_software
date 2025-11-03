@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Gemini Live Audio Stream</title>
+</head>
+<body>
+    <h1>Real-time Gemini Audio via WebRTC</h1>
+    <button id="start-button">Start Audio Stream</button>
+    <audio id="audio" autoplay controls></audio>
+    <p id="status">Status: Waiting to start...</p>
+
+    <script>
+        const pc = new RTCPeerConnection({
+            iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] 
+        });
+        const statusEl = document.getElementById('status');
+        const audioEl = document.getElementById('audio');
+
+        pc.ontrack = function (event) {
+            if (event.track.kind === 'audio') {
+                audioEl.srcObject = event.streams[0];
+                statusEl.textContent = 'Status: ✅ Audio stream received and playing in real-time!';
+            }
+        };
+        
+        pc.oniceconnectionstatechange = function () {
+            statusEl.textContent = `Status: ICE Connection State - ${pc.iceConnectionState}`;
+            if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
+                statusEl.textContent = `Status: ❌ Connection Failed/Closed. State: ${pc.iceConnectionState}`;
+            }
+        };
+
+        async function startConnection() {
+            try {
+                document.getElementById('start-button').disabled = true;
+                statusEl.textContent = 'Status: Creating WebRTC Offer...';
+                
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+
+                statusEl.textContent = 'Status: Sending Offer to backend (port 8080)...';
+                
+                // --- THIS IS THE MODIFIED LINE ---
+                // We must use the full URL to the backend server
+                const response = await fetch('http://localhost:8080/offer', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        sdp: pc.localDescription.sdp,
+                        type: pc.localDescription.type,
+                    }),
+                });
+                // --- END OF MODIFICATION ---
+
+                const answer = await response.json();
+                statusEl.textContent = 'Status: Received Answer, establishing connection...';
+                
+                await pc.setRemoteDescription(new RTCSessionDescription(answer));
+                
+            } catch (error) {
+                console.error('WebRTC setup failed:', error);
+                statusEl.textContent = `Status: ❌ Error during connection setup: ${error.message}`;
+                document.getElementById('start-button').disabled = false;
+            }
+        }
+
+        document.getElementById('start-button').onclick = startConnection;
+
+    </script>
+</body>
+</html>
