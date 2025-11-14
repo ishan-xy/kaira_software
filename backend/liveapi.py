@@ -1,4 +1,3 @@
-# liveserver.py
 import asyncio
 import json
 import logging
@@ -15,23 +14,17 @@ from aiohttp import web
 from aiortc import RTCPeerConnection, RTCSessionDescription
 from google import genai
 
-# --- NEW IMPORTS for RAG and Dynamic Context ---
 import requests
 import numpy as np
 import sentence_transformers
-try:
-    # Make sure retrieval.py is in the same folder or Python path
+try:    
     from retrieval import get_top_k_chunks
 except ImportError:
     print("WARNING: retrieval.py not found. RAG functionality will be disabled.")
-    # Create a mock function if retrieval.py is missing
     def get_top_k_chunks(model, query, embeddings, chunks, k=3):
         print("Mock RAG: Returning empty context because retrieval.py is missing.")
         return []
-# --- END NEW IMPORTS ---
 
-
-# --- 0. Configuration & Setup ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("WebRTC_Server")
 
@@ -43,12 +36,10 @@ if not API_KEY:
 
 client = genai.Client(api_key=API_KEY)
 model = "gemini-2.0-flash-live-001"
-# --- Note: Static GENAI_CONFIG is removed. It will be built dynamically. ---
 
 pc_set = set()
 active_data_channel = None
 
-# --- ZMQ Setup (No changes) ---
 AI_TRANSCRIPTION_PUB_URL = "ipc:///tmp/ai_transcription_stream"
 AI_PROMPT_PULL_URL = "ipc:///tmp/ai_prompt_stream" 
 
@@ -58,10 +49,8 @@ transcription_publisher.bind(AI_TRANSCRIPTION_PUB_URL)
 logger.info(f"ZMQ Publisher bound to {AI_TRANSCRIPTION_PUB_URL}")
 
 
-# --- NEW: RAG & DYNAMIC CONTEXT GLOBALS ---
 try:
     logger.info("Loading RAG embedding model and data...")
-    # Renamed to 'embedding_model' to avoid conflict with Gemini 'model' variable
     embedding_model = sentence_transformers.SentenceTransformer('BAAI/bge-small-en-v1.5')
     embeddings = np.load('RAG/embeddings.npy')
     chunks = np.load('RAG/chunks.npy', allow_pickle=True)
@@ -72,10 +61,8 @@ except Exception as e:
     embeddings = None
     chunks = None
 
-# Configuration for CV service (from llm_service.py)
-CV_SERVICE_URL = "http://localhost:8000"  # Adjust port as needed
+CV_SERVICE_URL = "http://localhost:8000"
 
-# KAIRA's personality and context (from llm_service.py)
 KAIRA_CONTEXT = """
 You are KAIRA (Knowledge-based Articulated Intelligent Robotic Assistant), an engaging, articulate, and friendly assistant created at Thapar University. 
 
@@ -134,36 +121,22 @@ Your job is to represent the innovation and spirit of Thapar University. Always 
 - When asked about Thapar officials, use the provided information respectfully and in a friendly, informational tone.
 - Overall, be the ultimate Thapar guide: **knowledgeable, enthusiastic, helpful, and approachable.**
 """
-# --- END NEW GLOBALS ---
-
-
-# --- NEW: HELPER FUNCTIONS (from llm_service.py) ---
 
 def get_current_person() -> Optional[Dict[str, str]]:
-    """
-    Fetch the currently recognized person from the CV service
-    Returns: Dict with 'identity' and 'emotion' or None if service unavailable/unknown person
-    """
     try:
         response = requests.get(f"{CV_SERVICE_URL}/current_person", timeout=2)
         if response.status_code == 200:
             data = response.json()
-            # Only return if person is recognized (not "Unknown")
             if data.get("identity") and data.get("identity") != "Unknown":
                 return data
         return None
     except Exception as e:
-        # Use warning level as this might happen normally if CV service is down
         logger.warning(f"Could not fetch current person from CV service: {e}")
         return None
 
 def build_conversation_context(recognized_person: Optional[Dict[str, str]] = None) -> str:
-    """
-    Build the dynamic conversation context including recognized person info
-    """
     context = ""
     
-    # Add recognized person context at the very beginning if available
     if recognized_person:
         identity = recognized_person.get("identity", "Unknown")
         emotion = recognized_person.get("emotion", "Neutral")
@@ -175,23 +148,17 @@ Be warm and personalized in your interaction.
 
 """
     
-    # Add the main KAIRA context
     context += KAIRA_CONTEXT
     
     return context
 
 def load_context_files(user_input: str) -> str:
-    """
-    Performs RAG lookup using the loaded embedding model and data.
-    """
     if embedding_model is None or embeddings is None or chunks is None:
         logger.warning("RAG components not loaded. Skipping context file lookup.")
         return ""
         
     try:
         output = ""
-        # This is a synchronous, CPU-bound operation,
-        # which is fine to run in this worker thread.
         for chunk in get_top_k_chunks(embedding_model, user_input, embeddings, chunks):
             output += " " + chunk
         
@@ -202,10 +169,6 @@ def load_context_files(user_input: str) -> str:
         logger.error(f"Error during RAG lookup: {e}")
         return ""
 
-# --- END NEW HELPER FUNCTIONS ---
-
-
-# --- ZMQ Prompt Receiver Thread (MODIFIED) ---
 def prompt_receiver_worker(loop, publisher):
     context = zmq.Context()
     socket = context.socket(zmq.PULL)
@@ -220,34 +183,22 @@ def prompt_receiver_worker(loop, publisher):
             global active_data_channel
             
             if prompt:
-                # --- START OF DYNAMIC CONTEXT INJECTION (NEW) ---
                 logger.info("Building dynamic context for new prompt...")
                 
-                # 1. Get face recognition data (sync request is OK in this thread)
                 recognized_person = get_current_person() 
-                
-                # 2. Get RAG data (sync embedding search is OK in this thread)
                 additional_context = load_context_files(prompt)
-                
-                # 3. Build the base system prompt with personality + person data
                 base_context = build_conversation_context(recognized_person)
                 
-                # 4. Assemble final system instruction
                 final_system_instruction = base_context
                 if additional_context:
-                    # Add the RAG context
                     final_system_instruction += f"\n\n[Additional Context]\n{additional_context}"
                 
-                # --- END OF DYNAMIC CONTEXT ---
-
-                # Wait for the data channel to be established
                 while not active_data_channel:
                     logger.warning("Received prompt via ZMQ, waiting for active data channel...")
                     time.sleep(0.1)
 
                 logger.info(f"Sending prompt to Gemini: {prompt[:50]}...")
                 
-                # MODIFIED: Pass the new dynamic context to the async session handler
                 asyncio.run_coroutine_threadsafe(
                     run_gemini_session(prompt, final_system_instruction, active_data_channel, publisher), 
                     loop
@@ -257,18 +208,18 @@ def prompt_receiver_worker(loop, publisher):
             logger.error(f"Error in prompt_receiver_worker: {e}")
             
             
-# --- Async Gemini Session Handler (MODIFIED) ---
-async def run_gemini_session(prompt, system_instruction, channel, publisher): # MODIFIED signature
+async def run_gemini_session(prompt, system_instruction, channel, publisher):
     logger.info("Connecting to Gemini for new prompt...") 
     try:
-        # NEW: Build the config dynamically for this specific session
         dynamic_genai_config = {
           "response_modalities": ["AUDIO"],
-          "system_instruction": system_instruction, # Use the dynamic context
-          "output_audio_transcription": {}
+          "system_instruction": system_instruction,
+          "output_audio_transcription": {},
+          "speech_config": {
+            "voice_config": {"prebuilt_voice_config": {"voice_name": "Kore"}}
+    },
         }
 
-        # MODIFIED: Use the dynamic_genai_config
         async with client.aio.live.connect(model=model, config=dynamic_genai_config) as session: #type: ignore
             logger.info("Gemini connected. Sending prompt.")
             
@@ -277,14 +228,12 @@ async def run_gemini_session(prompt, system_instruction, channel, publisher): # 
                 turn_complete=True
             )
             
-            # Stream audio/text response back
             await stream_gemini_audio(session, channel, publisher)
     
     except Exception as e:
         logger.error(f"Error in run_gemini_session: {e}")
 
 
-# --- 1. Gemini Live API Handler (No changes, streams audio/text chunks) ---
 async def stream_gemini_audio(session, data_channel, publisher):
     logger.info("Streaming response to WebRTC Data Channel...")
     
@@ -302,7 +251,6 @@ async def stream_gemini_audio(session, data_channel, publisher):
                     logger.info("First chunk received from Gemini.")
                 
                 chunk_counter += 1
-                # Send raw audio data over the WebRTC data channel
                 data_channel.send(response.data)
                 
             if response.server_content.output_transcription:
@@ -310,7 +258,6 @@ async def stream_gemini_audio(session, data_channel, publisher):
                 full_transcription += chunk_text  
                 print(chunk_text, end='', flush=True)
                 
-                # Publish the text chunk to the ZMQ topic
                 payload = json.dumps({"type": "chunk", "text": chunk_text})
                 publisher.send_multipart([b"ai_transcription", payload.encode()])
         
@@ -318,7 +265,6 @@ async def stream_gemini_audio(session, data_channel, publisher):
         logger.info("Gemini audio stream closed successfully.")
         
         if full_transcription:
-            # Publish the final, complete transcription to ZMQ
             payload = json.dumps({"type": "final", "text": full_transcription})
             publisher.send_multipart([b"ai_transcription", payload.encode()])
             logger.info(f"Published final transcription to ZMQ: {full_transcription[:50]}...")
@@ -341,10 +287,12 @@ async def stream_gemini_audio(session, data_channel, publisher):
             print("\n❌ No audio chunks were received for timing analysis.")
 
 
-# --- 2. WebRTC Signaling Handler (No changes) ---
 async def offer(request):
     params = await request.json()
     offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
+
+    logger.info("Received WebRTC Offer:")
+    logger.info(params["sdp"])
 
     pc = RTCPeerConnection()
     pc_set.add(pc)
@@ -381,7 +329,6 @@ async def offer(request):
     )
 
 
-# --- 3. Application Lifecycle (No changes) ---
 async def start_prompt_listener(app):
     logger.info("Application started, starting ZMQ prompt listener thread...")
     loop = asyncio.get_running_loop() 
@@ -403,7 +350,6 @@ async def on_shutdown(app):
     transcription_publisher.close()
     zmq_context.term()
 
-# --- 4. Main Execution (No changes) ---
 if __name__ == "__main__":
     app = web.Application()
     

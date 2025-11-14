@@ -13,7 +13,6 @@ except ImportError:
     FACE_RECO_LOADED = False
 
 socket_url = "ipc:///tmp/camera_stream"
-# NEW: URL for publishing identity data
 identity_pub_url = "ipc:///tmp/identity_stream" 
 
 latest_frame = None
@@ -28,7 +27,6 @@ consecutive_unknown_count = 0
 CONFIRM_NEW_FRAMES = 3
 CONFIRM_LOST_FRAMES = 5
 
-# NEW: Global ZMQ Publisher socket
 identity_publisher = None 
 
 def identity_worker():
@@ -36,7 +34,6 @@ def identity_worker():
     global latest_frame, latest_frame_lock, running
     print("Identity worker thread started...")
     
-    # NEW: Last published identity to avoid sending redundant messages
     last_published_identity = None 
     
     while running:
@@ -45,11 +42,9 @@ def identity_worker():
             if latest_frame is not None:
                 frame_to_process = latest_frame.copy()
                 
-        # --- IDENTITY PROCESSING LOGIC (UNCHANGED) ---
         if frame_to_process is not None:
             identity = process_identity_from_frame(frame_to_process) #type: ignore
             
-            # State Machine Logic
             if identity != "Unknown":
                 consecutive_unknown_count = 0
                 if identity == last_seen_identity:
@@ -69,7 +64,6 @@ def identity_worker():
                     current_known = "Unknown"
                     last_seen_identity = "Unknown"
             
-            # --- NEW: PUBLISH THE CURRENT_KNOWN IDENTITY ---
             if identity_publisher and current_known != last_published_identity:
                 try:
                     message = json.dumps({
@@ -77,37 +71,32 @@ def identity_worker():
                         "timestamp": time.time()
                     }).encode('utf-8')
                     
-                    # Publish the topic and the JSON message
                     identity_publisher.send_multipart([b"current_identity", message])
                     last_published_identity = current_known
                     print(f"Published identity: {current_known}")
                 except Exception as e:
-                    # Catch cases where the socket might be closing
                     print(f"Error publishing identity: {e}")
                     
         else:
-            time.sleep(0.05) # Slightly faster sleep when no frame is available
+            time.sleep(0.05) 
             
-        time.sleep(0.05) # Reduced sleep for responsiveness
+        time.sleep(0.05) 
 
 def main():
     global latest_frame, latest_frame_lock, running, identity_publisher
     
     context = zmq.Context()
     
-    # 1. ZMQ SUBSCRIBER (Receives Frames)
     frame_socket = context.socket(zmq.SUB)
     print("Connecting to ZMQ frame publisher...")
     frame_socket.connect(socket_url)
-    frame_socket.subscribe(b"camera_1")
-    print("Subscribed to 'camera_1'. Waiting for frames...")
+    frame_socket.subscribe(b"camera_0")
+    print("Subscribed to 'camera_0'. Waiting for frames...")
     
-    # 2. ZMQ PUBLISHER (Sends Identity)
     identity_publisher = context.socket(zmq.PUB)
     identity_publisher.bind(identity_pub_url)
     print(f"Identity publisher bound to '{identity_pub_url}'")
     
-    # Start the worker thread
     if FACE_RECO_LOADED:
         worker = threading.Thread(target=identity_worker, daemon=True)
         worker.start()
@@ -117,14 +106,12 @@ def main():
     
     try:
         while True:
-            # Receive Frame
             topic, meta_json, img_bytes = frame_socket.recv_multipart()
             recv_time = time.time()
             
             meta = json.loads(meta_json.decode())
             frame = np.frombuffer(img_bytes, dtype=meta['dtype']).reshape(meta['shape']).copy()
             
-            # Latency calculation
             send_time = meta['send_time']
             latency_ms = (recv_time - send_time) * 1000
             latencies.append(latency_ms)
@@ -137,12 +124,10 @@ def main():
                     latencies = []
                 last_print_time = current_time
                 
-            # Update frame for the worker thread
             with latest_frame_lock:
                 latest_frame = frame
                 
-            # Display frame
-            cv2.imshow("CV Script - Camera 1 (Live)", frame)
+            cv2.imshow("CV Script - Camera 0 (Live)", frame)
             
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
@@ -157,7 +142,7 @@ def main():
             
         cv2.destroyAllWindows()
         frame_socket.close()
-        identity_publisher.close() # Close the new publisher
+        identity_publisher.close() 
         context.term()
         print("Stopped.")
 

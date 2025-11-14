@@ -1,0 +1,13 @@
+pygame 
+websockets 
+aiortc 
+aiohttp 
+sounddevice
+numpy
+pyzmq
+python-dotenv
+google-genai
+requests
+sentence-transformers
+scipy
+RealtimeSTT

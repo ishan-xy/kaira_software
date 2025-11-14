@@ -1,0 +1,22 @@
+[project]
+name = "backend"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "aiohttp>=3.13.2",
+    "aiohttp-cors>=0.8.1",
+    "aiortc>=1.14.0",
+    "dlib>=20.0.0",
+    "fastapi>=0.121.1",
+    "google-genai>=1.50.0",
+    "numpy>=2.3.4",
+    "opencv-python>=4.11.0.86",
+    "python-dotenv>=1.2.1",
+    "pyzmq>=27.1.0",
+    "realtimestt>=0.3.104",
+    "scipy>=1.15.2",
+    "sentence-transformers>=5.1.2",
+    "websockets>=15.0.1",
+]

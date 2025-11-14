@@ -1,48 +1,366 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Gemini Live Audio Stream</title>
+    <title>AI Voice Assistant</title>
+    <meta charset="UTF-8">
+    <style>
+        html, body {
+            height: 100%;
+            margin: 0;
+        }
+        body {
+            background-color: black;
+            color: white;
+            font-family: Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            text-align: left;
+        }
+        
+        .container {
+            width: 90%;
+            max-width: 800px;
+            margin: auto;
+        }
+
+        #stateDisplay {
+            font-size: 1.2em;
+            color: #888;
+            margin-bottom: 10px;
+            text-align: center;
+            font-style: italic;
+            height: 1.2em;
+        }
+
+        #textDisplay {
+            white-space: pre-wrap;
+            font-size: 16px;
+            border: 1px solid #444;
+            padding: 10px;
+            min-height: 150px;
+            background-color: #111;
+        }
+        .yellow {
+            color: yellow;
+        }
+        .cyan {
+            color: cyan;
+        }
+
+        #aiResponseDisplay {
+            border-top: 2px solid #555;
+            margin-top: 20px;
+            padding-top: 10px;
+            font-size: 1.1em;
+        }
+        #aiResponseDisplay p {
+            margin: 8px 0;
+            line-height: 1.4;
+        }
+    </style>
 </head>
 <body>
-    <h1>Real-time Gemini Audio via WebRTC</h1>
-    <button id="start-button">Start Audio Stream</button>
-    <audio id="audio" autoplay controls></audio>
-    <p id="status">Status: Waiting to start...</p>
+    
+    <div class="container">
+        <div id="stateDisplay"></div>
+        <div id="textDisplay"></div>
+        <div id="aiResponseDisplay"></div>
+    </div>
 
     <script>
-        const pc = new RTCPeerConnection({
-            iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] 
-        });
-        const statusEl = document.getElementById('status');
-        const audioEl = document.getElementById('audio');
-
-        pc.ontrack = function (event) {
-            if (event.track.kind === 'audio') {
-                audioEl.srcObject = event.streams[0];
-                statusEl.textContent = 'Status: ✅ Audio stream received and playing in real-time!';
-            }
-        };
+        let socket = null;
+        const serverCheckInterval = 3000;
+        const maxReconnectDelay = 5000;
+        let reconnectAttempts = 0;
         
-        pc.oniceconnectionstatechange = function () {
-            statusEl.textContent = `Status: ICE Connection State - ${pc.iceConnectionState}`;
-            if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
-                statusEl.textContent = `Status: ❌ Connection Failed/Closed. State: ${pc.iceConnectionState}`;
-            }
-        };
+        let pc; 
+        let audioContext;
+        let nextTime = 0;
+        const geminiSampleRate = 24000; 
+        const webrtcRetryDelay = 3000;
 
-        async function startConnection() {
+        const stateDisplay = document.getElementById('stateDisplay');
+        const displayDiv = document.getElementById('textDisplay');
+        const aiDisplayDiv = document.getElementById('aiResponseDisplay');
+        
+        let fullSentences = [];
+        let server_available = false;
+        let mic_available = false;
+        let webrtc_available = false; 
+
+        let currentAppState = 'CONNECTING';
+        let currentAIResponseElement = null;
+        let isReconnecting = false;
+
+        function updateDisplayForState(state) {
+            let message = "";
+            switch (state) {
+                case 'CONNECTING':
+                    message = "🖥️ Connecting to server...";
+                    break;
+                case 'MIC_PERMISSION':
+                    message = "🎤 Please allow microphone access 🎤";
+                    break;
+                case 'TRANSCRIBER_UNAVAILABLE':
+                    message = "🎙️ Waiting for transcriber...";
+                    break;
+                case 'LISTENING':
+                    message = "🎙️ Listening...";
+                    break;
+                case 'GENERATING_RESPONSE':
+                    message = "🧠 Thinking...";
+                    break;
+                case 'SPEAKING':
+                    message = "🤖 Speaking...";
+                    break;
+                default:
+                    message = `Unknown state: ${state}`;
+            }
+            if (stateDisplay) {
+                stateDisplay.textContent = message;
+            }
+        }
+
+        function displayAIResponse(responseText) {
+            if (aiDisplayDiv) {
+                let p = document.createElement('p');
+                p.innerHTML = `<strong>🤖 AI:</strong> ${responseText}`; 
+                aiDisplayDiv.appendChild(p);
+                aiDisplayDiv.scrollTop = aiDisplayDiv.scrollHeight; 
+            } else {
+                console.warn("Element with id 'aiResponseDisplay' not found.");
+            }
+        }
+
+        function displayRealtimeText(realtimeText, displayDiv) {
+            let displayedText = fullSentences.map((sentence, index) => {
+                let span = document.createElement('span');
+                span.textContent = sentence + " ";
+                span.className = index % 2 === 0 ? 'yellow' : 'cyan';
+                return span.outerHTML;
+            }).join('') + realtimeText;
+
+            displayDiv.innerHTML = displayedText;
+        }
+
+        function handleSocketMessage(event) {
+            let data;
             try {
-                document.getElementById('start-button').disabled = true;
-                statusEl.textContent = 'Status: Creating WebRTC Offer...';
+                 data = JSON.parse(event.data);
+            } catch (e) {
+                console.error("Received non-JSON message:", event.data);
+                return;
+            }
+
+            console.log("Received message:", data.type, data);
+
+            switch (data.type) {
+                case 'appState':
+                    console.log("App state changed to:", data.state);
+                    currentAppState = data.state;
+                    updateDisplayForState(currentAppState);
+                    if (currentAppState === 'LISTENING' || currentAppState === 'TRANSCRIBER_UNAVAILABLE') {
+                        displayRealtimeText("", displayDiv);
+                    }
+                    break;
+                
+                case 'realtime':
+                    if (currentAppState === 'LISTENING') {
+                        displayRealtimeText(data.text, displayDiv);
+                    }
+                    break;
+                case 'fullSentence':
+                    fullSentences.push(data.text);
+                    if (currentAppState !== 'GENERATING_RESPONSE' && currentAppState !== 'SPEAKING') {
+                         displayRealtimeText("", displayDiv);
+                    }
+                    break;
+
+                case 'aiResponseStart':
+                    currentAIResponseElement = document.createElement('p');
+                    currentAIResponseElement.innerHTML = `<strong>🤖 AI:</strong> `;
+                    aiDisplayDiv.appendChild(currentAIResponseElement);
+                    
+                    currentAIResponseElement.innerHTML += data.text;
+                    aiDisplayDiv.scrollTop = aiDisplayDiv.scrollHeight; 
+                    break;
+
+                case 'aiResponseChunk':
+                    if (currentAIResponseElement) {
+                        currentAIResponseElement.innerHTML += data.text;
+                        aiDisplayDiv.scrollTop = aiDisplayDiv.scrollHeight; 
+                    }
+                    break;
+                
+                case 'aiResponseFinal':
+                    if (currentAIResponseElement) {
+                        currentAIResponseElement.innerHTML = `<strong>🤖 AI:</strong> ${data.text}`; 
+                    }
+                    currentAIResponseElement = null; 
+                    aiDisplayDiv.scrollTop = aiDisplayDiv.scrollHeight; 
+                    fullSentences = [];
+                    break;
+                
+                case 'pauseAudio':
+                    currentAppState = 'TRANSCRIBER_UNAVAILABLE';
+                    updateDisplayForState(currentAppState);
+                    break;
+                case 'resumeAudio':
+                    currentAppState = 'LISTENING';
+                    updateDisplayForState(currentAppState);
+                    break;
+            }
+        }
+
+        function connectToServer() {
+            if (isReconnecting) {
+                console.log("Already attempting to reconnect...");
+                return;
+            }
+
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                console.log("WebSocket already connected");
+                return;
+            }
+
+            isReconnecting = true;
+            console.log("Attempting to connect to WebSocket server...");
+            
+            // Close existing socket if it exists
+            if (socket) {
+                try {
+                    socket.close();
+                } catch (e) {
+                    console.error("Error closing existing socket:", e);
+                }
+            }
+
+            socket = new WebSocket("ws://localhost:8001");
+
+            socket.onopen = function() {
+                console.log("✅ WebSocket connected");
+                server_available = true;
+                isReconnecting = false;
+                reconnectAttempts = 0;
+                
+                // Request initial state if we don't receive it within 500ms
+                setTimeout(() => {
+                    if (currentAppState === 'CONNECTING') {
+                        console.log("No state received, assuming LISTENING");
+                        currentAppState = 'LISTENING';
+                        updateDisplayForState(currentAppState);
+                    }
+                }, 500);
+            };
+
+            socket.onmessage = handleSocketMessage; 
+
+            socket.onclose = function(event) {
+                console.warn("WebSocket closed:", event.code, event.reason);
+                server_available = false;
+                isReconnecting = false;
+                currentAppState = 'CONNECTING';
+                updateDisplayForState(currentAppState);
+                
+                // Exponential backoff for reconnection
+                reconnectAttempts++;
+                const delay = Math.min(1000 * reconnectAttempts, maxReconnectDelay);
+                console.log(`Reconnecting in ${delay}ms...`);
+                setTimeout(connectToServer, delay);
+            };
+            
+            socket.onerror = function(error) {
+                console.error("WebSocket error:", error);
+                server_available = false;
+                currentAppState = 'CONNECTING';
+                updateDisplayForState(currentAppState);
+            }
+        }
+
+        function initAudio() {
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                    sampleRate: geminiSampleRate 
+                });
+                nextTime = audioContext.currentTime;
+                console.log('✅ AudioContext initialized for Gemini playback.');
+            }
+        }
+
+        async function processAudioChunk(arrayBuffer) {
+            if (!audioContext) {
+                console.warn("AudioContext not ready, but received audio chunk.");
+                return;
+            }
+            if (arrayBuffer.byteLength === 0) return;
+
+            const int16View = new Int16Array(arrayBuffer);
+            const float32Array = new Float32Array(int16View.length);
+            for (let i = 0; i < int16View.length; i++) {
+                float32Array[i] = int16View[i] / 32768.0; 
+            }
+
+            const audioBuffer = audioContext.createBuffer(
+                1, float32Array.length, geminiSampleRate
+            );
+            audioBuffer.getChannelData(0).set(float32Array);
+
+            const source = audioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(audioContext.destination);
+
+            const playTime = Math.max(audioContext.currentTime, nextTime);
+            source.start(playTime);
+            
+            nextTime = playTime + audioBuffer.duration;
+        }
+
+        async function connectWebRTC() {
+            pc = new RTCPeerConnection({
+                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] 
+            });
+
+            pc.oniceconnectionstatechange = () => {
+                const state = pc.iceConnectionState;
+                console.log(`ICE Connection State: ${state}`);
+                if (state === 'failed' || state === 'disconnected' || state === 'closed') {
+                    if (webrtc_available) { 
+                        console.warn("WebRTC connection lost. Retrying...");
+                    }
+                    webrtc_available = false;
+                    pc.close(); 
+                    setTimeout(connectWebRTC, webrtcRetryDelay);
+                }
+            };
+            
+            try {
+                const data_channel = pc.createDataChannel("audio");
+                data_channel.binaryType = 'arraybuffer';
+
+                data_channel.onopen = () => {
+                    console.log("✅ WebRTC Data Channel OPEN.");
+                    initAudio(); 
+                    webrtc_available = true;
+                };
+
+                data_channel.onmessage = (event) => {
+                    if (event.data instanceof ArrayBuffer) {
+                        processAudioChunk(event.data);
+                    }
+                };
+
+                data_channel.onclose = () => {
+                    console.warn("WebRTC Data Channel CLOSED. Retrying...");
+                    webrtc_available = false;
+                };
                 
                 const offer = await pc.createOffer();
                 await pc.setLocalDescription(offer);
 
-                statusEl.textContent = 'Status: Sending Offer to backend (port 8080)...';
-                
-                // --- THIS IS THE MODIFIED LINE ---
-                // We must use the full URL to the backend server
-                const response = await fetch('http://localhost:8080/offer', {
+                console.log("Sending WebRTC Offer to backend (port 8081)...");
+
+                const response = await fetch('http://localhost:8081/offer', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -50,21 +368,86 @@
                         type: pc.localDescription.type,
                     }),
                 });
-                // --- END OF MODIFICATION ---
+
+                if (!response.ok) {
+                    throw new Error(`Signaling server returned ${response.status}`);
+                }
 
                 const answer = await response.json();
-                statusEl.textContent = 'Status: Received Answer, establishing connection...';
+                console.log("Received WebRTC Answer.");
                 
                 await pc.setRemoteDescription(new RTCSessionDescription(answer));
                 
             } catch (error) {
                 console.error('WebRTC setup failed:', error);
-                statusEl.textContent = `Status: ❌ Error during connection setup: ${error.message}`;
-                document.getElementById('start-button').disabled = false;
+                webrtc_available = false;
+                pc.close();
+                setTimeout(connectWebRTC, webrtcRetryDelay);
             }
         }
 
-        document.getElementById('start-button').onclick = startConnection;
+        // Initialize connection
+        connectToServer();
+        connectWebRTC();
+        updateDisplayForState(currentAppState);
+
+        // Setup microphone
+        navigator.mediaDevices.getUserMedia({ audio: true })
+        .then(stream => {
+            let micAudioContext = new AudioContext();
+            let source = micAudioContext.createMediaStreamSource(stream);
+            let processor = micAudioContext.createScriptProcessor(256, 1, 1);
+
+            source.connect(processor);
+            processor.connect(micAudioContext.destination);
+            mic_available = true;
+
+            processor.onaudioprocess = function(e) {
+                // Only send audio if WebSocket is connected and in appropriate state
+                if (!socket || socket.readyState !== WebSocket.OPEN || 
+                    (currentAppState !== 'LISTENING' && currentAppState !== 'GENERATING_RESPONSE')) {
+                    return;
+                }
+                
+                let inputData = e.inputBuffer.getChannelData(0);
+                let outputData = new Int16Array(inputData.length);
+
+                for (let i = 0; i < inputData.length; i++) {
+                    outputData[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32768));
+                }
+                
+                let metadata = JSON.stringify({ sampleRate: micAudioContext.sampleRate });
+                let metadataBytes = new TextEncoder().encode(metadata);
+                
+                let metadataLength = new ArrayBuffer(4);
+                let metadataLengthView = new DataView(metadataLength);
+                metadataLengthView.setInt32(0, metadataBytes.byteLength, true); 
+                
+                let combinedData = new Blob([metadataLength, metadataBytes, outputData.buffer]);
+                
+                try {
+                    socket.send(combinedData);
+                } catch (error) {
+                    console.error("Error sending audio data:", error);
+                }
+            };
+        })
+        .catch(e => {
+            console.error("Microphone access error:", e);
+            mic_available = false;
+            currentAppState = 'MIC_PERMISSION';
+            updateDisplayForState(currentAppState);
+        });
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.close();
+            }
+            if (pc) {
+                pc.close();
+            }
+        });
 
     </script>
 </body>

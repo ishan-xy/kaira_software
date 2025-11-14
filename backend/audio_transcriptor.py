@@ -8,15 +8,12 @@ import logging
 import sys
 from RealtimeSTT import AudioToTextRecorder
 
-# --- Basic Setup ---
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logging.getLogger('websockets').setLevel(logging.WARNING)
-
-# Silence noisy loggers
 logging.getLogger('faster_whisper').setLevel(logging.WARNING)
 logging.getLogger('RealtimeSTT').setLevel(logging.WARNING)
 
@@ -27,7 +24,6 @@ main_server_websocket = None
 main_loop = None
 
 async def send_to_main_server(message):
-    """Sends a JSON message to the main server if it's connected."""
     global main_server_websocket
     if main_server_websocket:
         try:
@@ -37,7 +33,6 @@ async def send_to_main_server(message):
             logging.warning("Main server disconnected")
 
 def text_detected(text):
-    """Called from the recorder thread on stabilized realtime text."""
     global main_loop
     if main_loop:
         asyncio.run_coroutine_threadsafe(
@@ -47,7 +42,6 @@ def text_detected(text):
             })), main_loop)
 
 def run_recorder():
-    """Runs the RealtimeSTT recorder in a separate thread, detecting full sentences."""
     global recorder, main_loop, is_running
     logging.info("Initializing RealtimeSTT...")
     recorder = AudioToTextRecorder(**recorder_config)
@@ -60,7 +54,6 @@ def run_recorder():
             if full_sentence:
                 logging.info(f"Detected sentence: {full_sentence}")
                 if main_loop:
-                    # Send the full sentence to the main server
                     asyncio.run_coroutine_threadsafe(
                         send_to_main_server(json.dumps({
                             'type': 'fullSentence',
@@ -87,7 +80,6 @@ recorder_config = {
 }
 
 def decode_and_resample(audio_data, original_sample_rate, target_sample_rate):
-    """Decodes and resamples audio data."""
     try:
         audio_np = np.frombuffer(audio_data, dtype=np.int16)
         num_original_samples = len(audio_np)
@@ -99,10 +91,6 @@ def decode_and_resample(audio_data, original_sample_rate, target_sample_rate):
         return audio_data
 
 async def transcriptor_handler(websocket):
-    """
-    Handles the WebSocket connection from the main_server.
-    Receives audio and feeds it to the recorder.
-    """
     global main_server_websocket
     logging.info("Main server connected")
     main_server_websocket = websocket
@@ -114,7 +102,6 @@ async def transcriptor_handler(websocket):
                 continue
 
             try:
-                # Audio data comes from main_server, already processed
                 metadata_length = int.from_bytes(message[:4], byteorder='little')
                 metadata_json = message[4:4+metadata_length].decode('utf-8')
                 metadata = json.loads(metadata_json)

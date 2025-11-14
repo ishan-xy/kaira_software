@@ -24,6 +24,15 @@
             margin: auto;
         }
 
+        #stateDisplay {
+            font-size: 1.2em;
+            color: #888;
+            margin-bottom: 10px;
+            text-align: center;
+            font-style: italic;
+            height: 1.2em;
+        }
+
         #textDisplay {
             white-space: pre-wrap;
             font-size: 16px;
@@ -54,16 +63,16 @@
 <body>
     
     <div class="container">
+        <div id="stateDisplay"></div>
         <div id="textDisplay"></div>
-
         <div id="aiResponseDisplay"></div>
     </div>
 
     <script>
-        // --- Global Variables ---
-        
-        let socket = new WebSocket("ws://localhost:8001");
-        const serverCheckInterval = 5000;
+        let socket = null;
+        const serverCheckInterval = 3000;
+        const maxReconnectDelay = 5000;
+        let reconnectAttempts = 0;
         
         let pc; 
         let audioContext;
@@ -71,24 +80,47 @@
         const geminiSampleRate = 24000; 
         const webrtcRetryDelay = 3000;
 
+        const stateDisplay = document.getElementById('stateDisplay');
         const displayDiv = document.getElementById('textDisplay');
         const aiDisplayDiv = document.getElementById('aiResponseDisplay');
+        
         let fullSentences = [];
         let server_available = false;
         let mic_available = false;
         let webrtc_available = false; 
 
-        // --- MODIFIED ---
-        // 'canSendAudio' is renamed to 'isTranscriberReady' to clarify it's the SERVER's state
-        let isTranscriberReady = false;
-        // --- NEW ---
-        // This variable will track if the user is holding the spacebar
-        let isSpacebarPressed = false;
-
-        // --- NEW: Keep track of the current AI response element ---
+        let currentAppState = 'CONNECTING';
         let currentAIResponseElement = null;
+        let isReconnecting = false;
 
-        // --- 1. UI & Display Functions ---
+        function updateDisplayForState(state) {
+            let message = "";
+            switch (state) {
+                case 'CONNECTING':
+                    message = "🖥️ Connecting to server...";
+                    break;
+                case 'MIC_PERMISSION':
+                    message = "🎤 Please allow microphone access 🎤";
+                    break;
+                case 'TRANSCRIBER_UNAVAILABLE':
+                    message = "🎙️ Waiting for transcriber...";
+                    break;
+                case 'LISTENING':
+                    message = "🎙️ Listening...";
+                    break;
+                case 'GENERATING_RESPONSE':
+                    message = "🧠 Thinking...";
+                    break;
+                case 'SPEAKING':
+                    message = "🤖 Speaking...";
+                    break;
+                default:
+                    message = `Unknown state: ${state}`;
+            }
+            if (stateDisplay) {
+                stateDisplay.textContent = message;
+            }
+        }
 
         function displayAIResponse(responseText) {
             if (aiDisplayDiv) {
@@ -112,29 +144,6 @@
             displayDiv.innerHTML = displayedText;
         }
 
-        // --- MODIFIED ---
-        // Updated UI messages for push-to-talk
-        function start_msg() {
-            if (!mic_available)
-                displayRealtimeText("🎤  please allow microphone access  🎤", displayDiv);
-            else if (!server_available)
-                displayRealtimeText("🖥️  connecting to server...  🖥️", displayDiv);
-            else if (!webrtc_available)
-                displayRealtimeText("🔊  connecting to audio stream...  🔊", displayDiv);
-            else if (!isTranscriberReady) 
-                displayRealtimeText("🎙️  waiting for transcriber...  🎙️", displayDiv);
-            else {
-                // Logic for PTT
-                if (isSpacebarPressed) {
-                    displayRealtimeText("👄 ... Speaking ... 👄", displayDiv);
-                } else {
-                    displayRealtimeText("🎙️ Hold SPACE to talk 🎙️", displayDiv);
-                }
-            }
-        }
-
-        // --- 2. WebSocket Logic (Mic -> Server) (MODIFIED) ---
-
         function handleSocketMessage(event) {
             let data;
             try {
@@ -144,30 +153,30 @@
                 return;
             }
 
+            console.log("Received message:", data.type, data);
+
             switch (data.type) {
-                // --- User speech transcription (unchanged) ---
+                case 'appState':
+                    console.log("App state changed to:", data.state);
+                    currentAppState = data.state;
+                    updateDisplayForState(currentAppState);
+                    if (currentAppState === 'LISTENING' || currentAppState === 'TRANSCRIBER_UNAVAILABLE') {
+                        displayRealtimeText("", displayDiv);
+                    }
+                    break;
+                
                 case 'realtime':
-                    displayRealtimeText(data.text, displayDiv);
+                    if (currentAppState === 'LISTENING') {
+                        displayRealtimeText(data.text, displayDiv);
+                    }
                     break;
                 case 'fullSentence':
                     fullSentences.push(data.text);
-                    displayRealtimeText("", displayDiv);
+                    if (currentAppState !== 'GENERATING_RESPONSE' && currentAppState !== 'SPEAKING') {
+                         displayRealtimeText("", displayDiv);
+                    }
                     break;
 
-                // --- MODIFIED ---
-                // Renamed variable for clarity
-                case 'pauseAudio':
-                    console.warn("Pausing audio transmission (server not ready).");
-                    isTranscriberReady = false;
-                    start_msg();
-                    break;
-                case 'resumeAudio':
-                    console.log("Resuming audio transmission (server is ready).");
-                    isTranscriberReady = true;
-                    start_msg();
-                    break;
-
-                // --- NEW: AI Response Streaming (No change here) ---
                 case 'aiResponseStart':
                     currentAIResponseElement = document.createElement('p');
                     currentAIResponseElement.innerHTML = `<strong>🤖 AI:</strong> `;
@@ -190,40 +199,84 @@
                     }
                     currentAIResponseElement = null; 
                     aiDisplayDiv.scrollTop = aiDisplayDiv.scrollHeight; 
+                    fullSentences = [];
+                    break;
+                
+                case 'pauseAudio':
+                    currentAppState = 'TRANSCRIBER_UNAVAILABLE';
+                    updateDisplayForState(currentAppState);
+                    break;
+                case 'resumeAudio':
+                    currentAppState = 'LISTENING';
+                    updateDisplayForState(currentAppState);
                     break;
             }
         }
 
         function connectToServer() {
+            if (isReconnecting) {
+                console.log("Already attempting to reconnect...");
+                return;
+            }
+
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                console.log("WebSocket already connected");
+                return;
+            }
+
+            isReconnecting = true;
+            console.log("Attempting to connect to WebSocket server...");
+            
+            // Close existing socket if it exists
+            if (socket) {
+                try {
+                    socket.close();
+                } catch (e) {
+                    console.error("Error closing existing socket:", e);
+                }
+            }
+
             socket = new WebSocket("ws://localhost:8001");
 
             socket.onopen = function() {
+                console.log("✅ WebSocket connected");
                 server_available = true;
-                start_msg();
+                isReconnecting = false;
+                reconnectAttempts = 0;
+                
+                // Request initial state if we don't receive it within 500ms
+                setTimeout(() => {
+                    if (currentAppState === 'CONNECTING') {
+                        console.log("No state received, assuming LISTENING");
+                        currentAppState = 'LISTENING';
+                        updateDisplayForState(currentAppState);
+                    }
+                }, 500);
             };
 
             socket.onmessage = handleSocketMessage; 
 
-            socket.onclose = function() {
+            socket.onclose = function(event) {
+                console.warn("WebSocket closed:", event.code, event.reason);
                 server_available = false;
-                // --- MODIFIED ---
-                isTranscriberReady = false; 
-                start_msg();
+                isReconnecting = false;
+                currentAppState = 'CONNECTING';
+                updateDisplayForState(currentAppState);
+                
+                // Exponential backoff for reconnection
+                reconnectAttempts++;
+                const delay = Math.min(1000 * reconnectAttempts, maxReconnectDelay);
+                console.log(`Reconnecting in ${delay}ms...`);
+                setTimeout(connectToServer, delay);
             };
             
-            socket.onerror = function() {
+            socket.onerror = function(error) {
+                console.error("WebSocket error:", error);
                 server_available = false;
-                // --- MODIFIED ---
-                isTranscriberReady = false; 
-                start_msg();
+                currentAppState = 'CONNECTING';
+                updateDisplayForState(currentAppState);
             }
         }
-
-        setInterval(() => {
-            if (!server_available) connectToServer();
-        }, serverCheckInterval);
-
-        // --- 3. WebRTC Logic (Server Audio -> Client) (No changes) ---
 
         function initAudio() {
             if (!audioContext) {
@@ -276,7 +329,6 @@
                         console.warn("WebRTC connection lost. Retrying...");
                     }
                     webrtc_available = false;
-                    start_msg();
                     pc.close(); 
                     setTimeout(connectWebRTC, webrtcRetryDelay);
                 }
@@ -290,7 +342,6 @@
                     console.log("✅ WebRTC Data Channel OPEN.");
                     initAudio(); 
                     webrtc_available = true;
-                    start_msg();
                 };
 
                 data_channel.onmessage = (event) => {
@@ -302,7 +353,6 @@
                 data_channel.onclose = () => {
                     console.warn("WebRTC Data Channel CLOSED. Retrying...");
                     webrtc_available = false;
-                    start_msg();
                 };
                 
                 const offer = await pc.createOffer();
@@ -331,39 +381,17 @@
             } catch (error) {
                 console.error('WebRTC setup failed:', error);
                 webrtc_available = false;
-                start_msg();
                 pc.close();
                 setTimeout(connectWebRTC, webrtcRetryDelay);
             }
         }
 
-        // --- 4. Initialization ---
-
-        // --- NEW ---
-        // Add event listeners for the spacebar to control push-to-talk
-        window.addEventListener('keydown', (event) => {
-            // Check if the key is Space and it's not already held down
-            if (event.code === 'Space' && !isSpacebarPressed) {
-                event.preventDefault(); // Stop the page from scrolling
-                isSpacebarPressed = true;
-                start_msg(); // Update UI to "Speaking..."
-            }
-        });
-
-        window.addEventListener('keyup', (event) => {
-            if (event.code === 'Space') {
-                event.preventDefault();
-                isSpacebarPressed = false;
-                start_msg(); // Update UI to "Hold SPACE..."
-            }
-        });
-        // --- END NEW ---
-
-
+        // Initialize connection
         connectToServer();
         connectWebRTC();
-        start_msg();
+        updateDisplayForState(currentAppState);
 
+        // Setup microphone
         navigator.mediaDevices.getUserMedia({ audio: true })
         .then(stream => {
             let micAudioContext = new AudioContext();
@@ -373,13 +401,11 @@
             source.connect(processor);
             processor.connect(micAudioContext.destination);
             mic_available = true;
-            start_msg();
 
             processor.onaudioprocess = function(e) {
-                
-                // --- MODIFIED ---
-                // Now checks for BOTH server readiness AND spacebar press
-                if (socket.readyState !== WebSocket.OPEN || !isTranscriberReady || !isSpacebarPressed) {
+                // Only send audio if WebSocket is connected and in appropriate state
+                if (!socket || socket.readyState !== WebSocket.OPEN || 
+                    (currentAppState !== 'LISTENING' && currentAppState !== 'GENERATING_RESPONSE')) {
                     return;
                 }
                 
@@ -399,13 +425,28 @@
                 
                 let combinedData = new Blob([metadataLength, metadataBytes, outputData.buffer]);
                 
-                socket.send(combinedData);
+                try {
+                    socket.send(combinedData);
+                } catch (error) {
+                    console.error("Error sending audio data:", error);
+                }
             };
         })
         .catch(e => {
-            console.error(e);
+            console.error("Microphone access error:", e);
             mic_available = false;
-            start_msg();
+            currentAppState = 'MIC_PERMISSION';
+            updateDisplayForState(currentAppState);
+        });
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.close();
+            }
+            if (pc) {
+                pc.close();
+            }
         });
 
     </script>

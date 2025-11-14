@@ -7,18 +7,18 @@ import aiohttp
 import threading
 import zmq
 import numpy as np
-
-# --- Global State for Identity ---
+from typing import Optional
+from websockets.legacy.server import WebSocketServerProtocol
+from websockets.legacy.client import WebSocketClientProtocol
 current_known_identity = "Unknown"
 last_known_identity = "Unknown"
 IDENTITY_SUB_URL = "ipc:///tmp/identity_stream"
 AI_TRANSCRIPTION_SUB_URL = "ipc:///tmp/ai_transcription_stream"
 AI_PROMPT_PUSH_URL = "ipc:///tmp/ai_prompt_stream" 
 
-# --- NEW: Global state for tracking AI response stream ---
 IS_STREAMING_AI_RESPONSE = False
+global_app_state = "CONNECTING"
 
-# --- Basic Setup ---
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -26,14 +26,12 @@ logging.basicConfig(
 )
 logging.getLogger('websockets').setLevel(logging.WARNING)
 
-# --- Connection Management ---
-browser_websocket = None
-transcriptor_websocket = None
+browser_websocket: Optional[WebSocketServerProtocol] = None
+transcriptor_websocket: Optional[WebSocketClientProtocol] = None
 prompt_publisher = None 
 zmq_context = None 
 TRANSCRIPTOR_URI = "ws://localhost:8002"
 
-# --- ZMQ: Identity Worker (No changes) ---
 def identity_subscriber_worker(loop, identity_queue):
     context = zmq.Context()
     socket = context.socket(zmq.SUB)
@@ -54,7 +52,6 @@ def identity_subscriber_worker(loop, identity_queue):
         context.term()
         logging.info("ZMQ Identity Worker shut down.")
 
-# --- ZMQ: AI Transcription Worker (No changes) ---
 def transcription_subscriber_worker(loop, transcription_queue):
     context = zmq.Context()
     socket = context.socket(zmq.SUB)
@@ -75,7 +72,6 @@ def transcription_subscriber_worker(loop, transcription_queue):
         context.term()
         logging.info("ZMQ Transcription Worker shut down.")
 
-# --- Async: Identity Consumer (No changes) ---
 async def consume_identity_updates(identity_queue):
     global current_known_identity, last_known_identity
     while True:
@@ -99,12 +95,7 @@ async def consume_identity_updates(identity_queue):
         except Exception as e:
             logging.error(f"Error processing identity update: {e}")
 
-# --- Async: AI Transcription Consumer (MODIFIED) ---
 async def consume_transcription_updates(transcription_queue):
-    """
-    Pulls transcriptions from ZMQ and relays them to the browser
-    in streaming chunks.
-    """
     global IS_STREAMING_AI_RESPONSE
     while True:
         transcription_json = await transcription_queue.get()
@@ -116,35 +107,29 @@ async def consume_transcription_updates(transcription_queue):
 
             if msg_type == "chunk":
                 if not IS_STREAMING_AI_RESPONSE:
-                    # This is the first chunk of a new response
+                    await broadcast_app_state("SPEAKING")
                     browser_msg_type = "aiResponseStart"
                     IS_STREAMING_AI_RESPONSE = True
                 else:
-                    # This is a subsequent chunk
                     browser_msg_type = "aiResponseChunk"
                 
-                # Relay the chunk to the browser
                 await send_to_browser(json.dumps({
                     'type': browser_msg_type,
                     'text': text
                 }))
             
             elif msg_type == "final":
-                # The stream for this response is done.
                 IS_STREAMING_AI_RESPONSE = False
                 
-                # Send a final, complete message to the browser
-                # This ensures the browser has the full text and can reset.
                 await send_to_browser(json.dumps({
                     'type': 'aiResponseFinal', 
                     'text': text
                 }))
                 logging.info(f"[AI Processing] Relayed final transcription: {text[:50]}...")
-        
+                await broadcast_app_state("LISTENING")
+
         except Exception as e:
             logging.error(f"Error processing transcription update: {e}")
-
-# --- Main Server Functions ---
 
 async def send_to_browser(message):
     global browser_websocket
@@ -154,10 +139,24 @@ async def send_to_browser(message):
         except websockets.exceptions.ConnectionClosed:
             logging.warning("Browser connection closed mid-send.")
 
-# --- process_ai_prompt (No changes) ---
+async def broadcast_app_state(new_state):
+    global global_app_state, browser_websocket
+    if new_state == global_app_state:
+        return 
+    
+    global_app_state = new_state
+    logging.info(f"APP_STATE -> {new_state}")
+    await send_to_browser(json.dumps({
+        'type': 'appState',
+        'state': new_state
+    }))
+
 async def process_ai_prompt(prompt_text):
     global current_known_identity, last_known_identity, prompt_publisher
     logging.info(f"\n[AI Processing] Received prompt: {prompt_text}")
+    
+    await broadcast_app_state("GENERATING_RESPONSE")
+    
     name = current_known_identity
     
     if name != "Unknown":
@@ -172,10 +171,11 @@ async def process_ai_prompt(prompt_text):
             prompt_publisher.send_json({"prompt": prompt_text})
         except Exception as e:
             logging.error(f"Failed to send prompt via ZMQ: {e}")
+            await broadcast_app_state("LISTENING")
     else:
         logging.error("ZMQ Prompt Publisher not initialized.")
+        await broadcast_app_state("LISTENING")
 
-# --- connect_to_transcriptor (Robust version from previous answer) ---
 async def connect_to_transcriptor():
     global transcriptor_websocket
     while True:
@@ -184,7 +184,7 @@ async def connect_to_transcriptor():
                 logging.info("Connected to Audio Transcriptor")
                 transcriptor_websocket = websocket
                 
-                await send_to_browser(json.dumps({'type': 'resumeAudio'}))
+                await broadcast_app_state("LISTENING")
                 
                 async for message in websocket:
                     try:
@@ -208,30 +208,35 @@ async def connect_to_transcriptor():
             logging.error(f"Unexpected error in transcriptor loop: {e}. Reconnecting in 2s...")
         
         transcriptor_websocket = None
-        await send_to_browser(json.dumps({'type': 'pauseAudio'}))
+        await broadcast_app_state("TRANSCRIBER_UNAVAILABLE")
         await asyncio.sleep(2)
 
-# --- browser_handler (Robust version from previous answer) ---
 async def browser_handler(websocket):
-    global browser_websocket
+    global browser_websocket, global_app_state
     
     if browser_websocket:
         logging.warning("New client connected, disconnecting the old one.")
+        old_socket = browser_websocket
         try:
-            await browser_websocket.send(json.dumps({'type': 'pauseAudio'}))
-            await browser_websocket.close(code=1000, reason="Replaced by new connection")
+            await old_socket.close(code=1000, reason="Replaced by new connection")
         except websockets.exceptions.ConnectionClosed:
             pass
-            
+    
+    # CRITICAL: Set this FIRST
     browser_websocket = websocket
     logging.info(f"Browser client connected.")
     
-    await send_to_browser(json.dumps({'type': 'pauseAudio'}))
+    # Force send the current state directly to the new client
+    current_state = "LISTENING" if transcriptor_websocket else "TRANSCRIBER_UNAVAILABLE"
+    try:
+        await websocket.send(json.dumps({
+            'type': 'appState',
+            'state': current_state
+        }))
+        logging.info(f"Sent initial state to browser: {current_state}")
+    except Exception as e:
+        logging.error(f"Failed to send initial state: {e}")
     
-    if transcriptor_websocket:
-        logging.info("Transcriptor is already connected, sending resume.")
-        await send_to_browser(json.dumps({'type': 'resumeAudio'}))
-        
     try:
         async for message in websocket:
             if transcriptor_websocket:
@@ -251,7 +256,6 @@ async def browser_handler(websocket):
              browser_websocket = None
              logging.info(f"Active client removed.")
 
-# --- main (No changes) ---
 async def main():
     global prompt_publisher, zmq_context
     loop = asyncio.get_running_loop()
@@ -282,7 +286,7 @@ async def main():
     transcription_thread.start()
     
     asyncio.create_task(consume_identity_updates(identity_queue))
-    asyncio.create_task(consume_transcription_updates(transcription_queue)) # This will run the modified version
+    asyncio.create_task(consume_transcription_updates(transcription_queue))
     asyncio.create_task(connect_to_transcriptor())
     
     logging.info("Main server started on ws://localhost:8001")
