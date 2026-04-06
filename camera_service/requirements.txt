@@ -1,0 +1,7 @@
+pygame>=2.1.0
+pillow>=9.0.0
+numpy>=1.23.0
+opencv-python>=4.7.0.68
+pandas>=1.5.0
+qrcode>=7.3
+openpyxl>=3.0.10

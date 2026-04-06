@@ -1,0 +1,25 @@
+numpy
+opencv-python
+pyzmq
+aiohttp
+aiohttp-cors
+aiortc
+av
+pygame
+pyaudio
+sentence-transformers
+torch
+google-genai
+fastapi
+uvicorn
+requests
+python-dotenv
+RealtimeSTT
+# dlib
+openwakeword
+# Camera service dependencies
+qrcode
+pillow
+pandas
+openpyxl
+opencv-python

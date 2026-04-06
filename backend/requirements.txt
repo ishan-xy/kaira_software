@@ -1,7 +1,0 @@
-RealtimeSTT
-websockets
-numpy
-scipy
-opencv-python
-fastapi
-sentence-transformers
