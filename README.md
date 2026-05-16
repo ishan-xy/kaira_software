@@ -8,7 +8,7 @@ The system is designed around low-latency communication and real-time streaming 
 
 ---
 <img width="1852" height="2470" alt="ea3b89d3-488b-46a3-8686-c86559ba5388" src="https://github.com/user-attachments/assets/97a1c596-71f4-4b2b-ae02-1a730eda8909" />
----
+
 ## Architecture
 
 ### Camera Pipeline
